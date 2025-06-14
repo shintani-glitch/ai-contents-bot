@@ -1,0 +1,189 @@
+import os
+import random
+import json
+import requests
+import time
+import re
+from datetime import datetime
+import pytz
+import gspread
+import google.generativeai as genai
+from google.oauth2.service_account import Credentials
+
+# --- 定数設定 ---
+SPREADSHEET_NAME = 'コスメ投稿案リスト'
+SERVICE_ACCOUNT_FILE = 'google_credentials.json'
+
+# --- スケジュール定義 ---
+# キーは「時:分」、値は実行するタスクの種類
+WEEKDAY_SCHEDULE = {
+    "07:00": "planner", "07:30": "planner", "08:30": "planner",
+    "12:05": "planner", "12:30": "planner", "16:00": "planner",
+    "17:30": "planner", "19:00": "affiliate", "20:00": "affiliate",
+    "21:00": "affiliate", "21:45": "planner", "22:15": "affiliate",
+    "23:00": "planner", "23:45": "planner", "00:30": "planner"
+}
+HOLIDAY_SCHEDULE = {
+    "09:30": "planner", "10:30": "planner", "11:30": "affiliate",
+    "13:00": "planner", "14:30": "planner", "16:00": "affiliate",
+    "17:30": "planner", "19:00": "planner", "20:00": "affiliate",
+    "21:00": "affiliate", "21:45": "planner", "22:30": "affiliate",
+    "23:15": "planner", "23:50": "affiliate", "00:30": "planner"
+}
+
+# --- 初期セットアップ ---
+def setup():
+    """APIキーの読み込みと設定を行う"""
+    try:
+        GEMINI_API_KEY = os.getenv('GEMINI_API_KEY2')
+        RAKUTEN_APP_ID = os.getenv('RAKUTEN_APP_ID')
+        RAKUTEN_AFFILIATE_ID = os.getenv('RAKUTEN_AFFILIATE_ID')
+
+        if not all([GEMINI_API_KEY, RAKUTEN_APP_ID, RAKUTEN_AFFILIATE_ID]):
+            print("🛑 エラー: 必要なAPIキーが環境変数に設定されていません。")
+            return None, None, None
+
+        genai.configure(api_key=GEMINI_API_KEY)
+        print("✅ APIキーの読み込みに成功しました。")
+        return GEMINI_API_KEY, RAKUTEN_APP_ID, RAKUTEN_AFFILIATE_ID
+    except Exception as e:
+        print(f"🛑 エラー: 環境変数からAPIキーを読み込めませんでした。エラー詳細: {e}")
+        return None, None, None
+
+def get_gspread_client():
+    """サービスアカウントを使ってgspreadクライアントを認証・取得する"""
+    scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+    if os.path.exists(SERVICE_ACCOUNT_FILE):
+        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+        return gspread.authorize(creds)
+    else:
+        print(f"🛑 エラー: サービスアカウントのキーファイル '{SERVICE_ACCOUNT_FILE}' が見つかりません。")
+        return None
+
+# ==============================================================================
+# プログラム１：価値提供ツイート案（スレッド形式）を生成するプログラム
+# ==============================================================================
+def run_content_planner(worksheet):
+    print("--- 価値提供ツイート案の生成を実行します ---")
+    # (この関数の内容は前回と同じです)
+    theme_prompt = f"あなたは、日本のSNSマーケティングの専門家です。X(Twitter)アカウント「ゆあ＠プチプラコスメ塾」の投稿テーマを、今度は少し詳しめに解説できるようなものを5個考えてください。\n# アカウント情報\n- ターゲット：日本の10代〜20代の女性\n- コンセプト：プチプラコスメ専門家「ゆあ」が、塾の先生のようにコスメの選び方やメイク術を教える\n- 目的：フォロワーを増やすこと。特に情報の価値を高め、投稿の保存数を増やしたい\n# 考慮すべき現在の状況\n- 現在の時期：{datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%Y年%m月')}\n- 季節的な悩み：梅雨の湿気、汗によるメイク崩れ、紫外線対策、夏のトレンドカラーなど\n# 出力形式\n- 1行に1つのテーマで、リスト形式で出力してください。\n- 番号やハイフンは不要です。"
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(theme_prompt)
+        ideas = [re.sub(r'^\s*[-*・]?\s*', '', idea).strip() for idea in response.text.strip().split('\n') if idea.strip()]
+        print(f"✅ 生成されたテーマ: {ideas}")
+        for topic in ideas:
+            print(f"--- 投稿案：『{topic}』---")
+            post_prompt = f"あなたは、Xアカウント「ゆあ＠プチプラコスメ塾」の運営者「ゆあ」です。プチプラコスメの専門家として、10代〜20代のフォロワーにメイクの楽しさやコツを教えています。以下のルールを厳守して、「スレッド投稿（複数の投稿が連なる形式）」を作成してください。\n# ルール\n- 親しみやすく、少し先生のような頼れる口調で書く。\n- 2〜3個の投稿で構成されるスレッドを作成する。\n- 【1番目の投稿】は、読者の興味を引く「問題提起」や「結論の予告」で始める。投稿の最後は「続きはリプ欄へ！👇」のように、スレッドが続くことを示す言葉で締める。\n- 【2番目以降の投稿】で、具体的な方法、商品の紹介、詳しい解説を行う。絵文字や箇条書きを使い、視覚的に分かりやすくする。\n- 各投稿は、絵文字やハッシュタグを含めて、必ず日本語140文字以内に厳密におさめること。\n- 各投稿の間は、必ず「---」という区切り文字だけを入れてください。\n- ハッシュタグ（#プチプラコスメ #コスメ塾 など）は、スレッドの最後の投稿にまとめて3つ程度入れる。\n# 投稿テーマ\n{topic}"
+            response = model.generate_content(post_prompt)
+            threaded_posts = [post.strip() for post in response.text.strip().split('---') if post.strip()]
+            jst = pytz.timezone('Asia/Tokyo')
+            timestamp = datetime.now(jst).strftime('%Y-%m-%d %H:%M:%S')
+            row_to_add = [timestamp, topic] + threaded_posts
+            worksheet.append_row(row_to_add)
+            print(f"✅ スプレッドシートに記録しました。")
+            time.sleep(20) # Gemini APIのレート制限対策
+    except Exception as e:
+        print(f"🛑 エラー: 価値提供ツイートの生成中にエラー: {e}")
+
+
+# ==============================================================================
+# プログラム２：アフィリエイト投稿案を生成するプログラム
+# ==============================================================================
+def run_affiliate_bot(worksheet, RAKUTEN_APP_ID, RAKUTEN_AFFILIATE_ID):
+    print("--- アフィリエイト投稿案の生成を実行します ---")
+    # (この関数の内容は前回と同じです)
+    try:
+        keyword_prompt = "あなたは、楽天市場でこれから化粧品を探そうとしている、トレンドに敏感な日本の10代〜20代の女性です。「プチプラコスメ」や「韓国コスメ」に関連する、具体的でヒットしやすい検索キーワードを1つだけ生成してください。\n# 指示:\n- ブランド名や商品カテゴリ名を組み合わせるのも良い方法です。(例: KATE リップモンスター)\n- 回答は、生成したキーワードの文字列だけにしてください。"
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(keyword_prompt)
+        keyword = response.text.strip()
+        print(f"✅ 生成されたキーワード: {keyword}")
+
+        url = "https://app.rakuten.co.jp/services/api/IchibaItem/Search/20220601"
+        params = {"applicationId": RAKUTEN_APP_ID, "affiliateId": RAKUTEN_AFFILIATE_ID, "keyword": keyword, "format": "json", "sort": "-reviewCount", "hits": 10}
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        items = response.json().get("Items", [])
+
+        if not items:
+            print("⚠️ 楽天で商品が見つかりませんでした。")
+            return
+
+        formatted_items_string = "\n".join([f"- 商品名: {item['Item']['itemName']}, URL: {item['Item']['affiliateUrl']}" for item in items])
+        tweet_prompt = f"あなたは人気のコスメを紹介するインフルエンサーです。以下の楽天の商品リストの中から、10代から20代の女性に最もおすすめしたい「最強のプチプラコスメ」を1つだけ選び、その商品の紹介文とアフィリエイトURLをJSON形式で返してください。\n# 制約条件:\n- 「価格」には触れないでください。\n- 紹介文は100文字以内にしてください。\n- ハッシュタグ「#PR」「#プチプラコスメ」を入れてください。\n# JSON形式:\n{{\n  \"tweet_text\": \"（紹介文）\",\n  \"affiliate_url\": \"（URL）\"\n}}\n# 商品リスト:\n{formatted_items_string}"
+
+        response = model.generate_content(tweet_prompt)
+        cleaned_response = response.text.strip().replace("```json", "").replace("```", "")
+        result = json.loads(cleaned_response)
+
+        short_url_res = requests.get(f"http://tinyurl.com/api-create.php?url={result['affiliate_url']}")
+        short_url = short_url_res.text if short_url_res.status_code == 200 else result['affiliate_url']
+
+        full_tweet = f"{result['tweet_text']}\n\n👇商品の詳細はこちらからチェック✨\n{short_url}"
+        print("--- 生成された投稿案 ---")
+        print(full_tweet)
+        print("----------------------")
+
+        jst = pytz.timezone('Asia/Tokyo')
+        timestamp = datetime.now(jst).strftime('%Y-%m-%d %H:%M:%S')
+        row_to_add = [timestamp, f"アフィリエイト投稿: {keyword}", full_tweet]
+        worksheet.append_row(row_to_add)
+        print("✅ アフィリエイト投稿案をスプレッドシートに記録しました。")
+    except Exception as e:
+        print(f"🛑 エラー: アフィリエイト投稿の生成中にエラー: {e}")
+
+
+# ==============================================================================
+# メインの実行ロジック
+# ==============================================================================
+if __name__ == "__main__":
+    print("🚀 スケジュール実行を開始します。")
+    GEMINI_API_KEY, RAKUTEN_APP_ID, RAKUTEN_AFFILIATE_ID = setup()
+
+    if not GEMINI_API_KEY:
+        raise SystemExit("APIキーのセットアップに失敗したため、処理を終了します。")
+
+    # JSTで現在時刻を取得
+    jst = pytz.timezone('Asia/Tokyo')
+    now = datetime.now(jst)
+    current_time_str = now.strftime("%H:%M")
+    # 曜日を取得 (0=月, 1=火, ... 5=土, 6=日)
+    weekday = now.weekday()
+
+    print(f"現在の日本時間は {now.strftime('%Y-%m-%d %H:%M:%S')} ({['月','火','水','木','金','土','日'][weekday]}曜日) です。")
+
+    # 平日か休日かを判断 (土日を休日とする)
+    if weekday < 5: # 0-4は平日
+        schedule = WEEKDAY_SCHEDULE
+        print("本日は平日です。")
+    else: # 5,6は休日
+        schedule = HOLIDAY_SCHEDULE
+        print("本日は休日です。")
+
+    # 現在時刻がスケジュールにあるかチェック
+    if current_time_str in schedule:
+        task = schedule[current_time_str]
+        print(f"⏰ スケジュールされた時刻です！タスク「{task}」を実行します。")
+
+        gc = get_gspread_client()
+        if gc:
+            try:
+                sh = gc.open(SPREADSHEET_NAME)
+                worksheet = sh.sheet1
+                # ヘッダー行の確認
+                if not worksheet.get_all_values():
+                    worksheet.append_row(['生成日時', 'テーマ', '投稿1', '投稿2', '投稿3', '投稿4'])
+
+                # タスクに応じて関数を実行
+                if task == "planner":
+                    run_content_planner(worksheet)
+                elif task == "affiliate":
+                    run_affiliate_bot(worksheet, RAKUTEN_APP_ID, RAKUTEN_AFFILIATE_ID)
+
+            except Exception as e:
+                print(f"🛑 エラー: スプレッドシートの処理中にエラー: {e}")
+    else:
+        print("現在の時刻は、指定された投稿スケジュールにありません。")
+
+    print("🏁 処理を終了します。")
