@@ -57,11 +57,32 @@ def run_content_planner():
         theme_prompt = f"あなたは日本のSNSマーケティングの専門家です。X(Twitter)アカウント「ゆあ＠プチプラコスメ塾」のフォロワーが保存したくなるような、詳しい解説形式の投稿テーマを1つ考えてください。\n#考慮すべき状況\n- 現在の時期：{datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%Y年%m月')}\n- 最近の美容トレンド：Y2Kメイク、純欲メイク、中顔面短縮メイクなど\n#出力形式\n- 1行に1つのテーマで出力。番号やハイフンは不要。"
         response = g_gemini_model.generate_content(theme_prompt)
         topic = response.text.strip()
-        
-        post_prompt = f"あなたは、Xアカウント「ゆあ＠プチプラコスメ塾」の運営者「ゆあ」です。以下のテーマで、読者の興味を引くタイトルから始まる、一つのまとまった読み応えのある解説記事を作成してください。\n# ルール\n- 親しみやすく、少し先生のような頼れる口調で書く。\n- 文字数制限はありません。\n- アスタリスク(*)は使わず、【】や・を使い、絵文字も交えて分かりやすくしてください。\n- 最後にハッシュタグ #プチプラコスメ #コスメ塾 を付けてください。\n# 投稿テーマ\n{topic}"
+        print(f"  ✅ 生成されたテーマ: {topic}")
+
+        # ★★★★★ プロンプトを大幅にアップグレード ★★★★★
+        post_prompt = f"""
+あなたは、Xアカウント「ゆあ＠プチプラコスメ塾」の運営者「ゆあ」です。
+プチプラコスメの専門家として、10代〜20代のフォロワーに、実践的で価値の高い情報を提供します。
+以下のルールを厳守して、1つのまとまった解説記事を作成してください。
+
+# 絶対的なルール
+- **スマホでの見やすさを最優先**する。
+- **適度な改行や空白行**を効果的に使い、文章が詰まって見えないようにレイアウトする。
+- 重要なキーワードは【】で囲むなどして、視覚的に強調する。
+- **アスタリスク(*)などのマークダウン記法は一切使用しない**こと。
+- 生成した文章は、必ず**最初から最後まで一人の人間（「ゆあ」）が書いたかのような、一貫した自然な日本語**にする。
+- 情報の正確性を重視し、根拠のない内容や、意味の通らない文章は絶対に含めない。
+- 最後に、**あなた自身で文章を読み返し、不自然な点がないかセルフチェック**を行ってから出力を完了する。
+- 親しみやすく、少し先生のような頼れる口調で書く。
+- 読者の興味を引く「タイトル」から始める。
+- 箇条書きや絵文字（✨💄💡など）を効果的に使う。
+- ハッシュタグ（#プチプラコスメ #コスメ塾 など）は、記事の最後にまとめて3〜4個入れる。
+
+# 投稿テーマ
+{topic}
+"""
         response = g_gemini_model.generate_content(post_prompt)
         post_content = response.text.strip()
-        print(f"  ✅ テーマ「{topic}」の投稿案を生成完了。")
         return {"type": "planner", "topic": topic, "content": post_content}
     except Exception as e:
         print(f"  🛑 価値提供ツイートの生成中にエラー: {e}")
@@ -72,8 +93,7 @@ def run_content_planner():
 # ==============================================================================
 def generate_affiliate_post():
     print("  - アフィリエイト投稿案を生成中...")
-    # ★★★★★ 安定化のためのリトライロジックを追加 ★★★★★
-    for attempt in range(3): # 最大3回試行
+    for attempt in range(3):
         try:
             import requests
             keyword_prompt = "あなたは楽天市場で化粧品を探しているトレンドに敏感な女性です。「プチプラコスメ」や「韓国コスメ」関連で、具体的な検索キーワードを1つ生成してください。(例: KATE リップモンスター)。回答はキーワード文字列のみでお願いします。"
@@ -88,7 +108,10 @@ def generate_affiliate_post():
             
             if items:
                 formatted_items = "\n".join([f"- 商品名: {i['Item']['itemName']}, キャッチコピー: {i['Item']['catchcopy']}, URL: {i['Item']['affiliateUrl']}" for i in items])
-                tweet_prompt = f"あなたは人気のコスメ紹介インフルエンサーです。以下の楽天の人気商品リストから、最も響く商品を1つ選び、その商品の紹介文とアフィリエイトURLをJSON形式で返してください。\n#ルール\n- 価格に触れない\n- 100文字以内\n- #PR #楽天でみつけた神コスメ を含める\n#JSON形式\n{{\"tweet_text\": \"（紹介文）\", \"affiliate_url\": \"（URL）\"}}\n#商品リスト:\n{formatted_items}"
+                
+                # ★★★★★ プロンプトをアップグレード ★★★★★
+                tweet_prompt = f"あなたは人気のコスメ紹介インフルエンサーです。以下の楽天の人気商品リストから、最も響く商品を1つ選び、その商品の紹介文とアフィリエイトURLをJSON形式で返してください。\n#ルール\n- まるでユーザーのリアルな口コミを要約したかのような、説得力のある文章を作成する。\n- **生成する文章は、日本語として自然で、意味が明確に伝わるようにすること。**\n- 「価格」に触れない。\n- 100文字以内にまとめる。\n- ハッシュタグ「#PR」「#楽天でみつけた神コスメ」を入れる。\n#JSON形式\n{{\"tweet_text\": \"（紹介文）\", \"affiliate_url\": \"（URL）\"}}\n#商品リスト:\n{formatted_items}"
+                
                 response = g_gemini_model.generate_content(tweet_prompt)
                 result = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
                 short_url = requests.get(f"http://tinyurl.com/api-create.php?url={result['affiliate_url']}").text
@@ -122,7 +145,6 @@ if __name__ == "__main__":
         sh = gc.open(SPREADSHEET_NAME)
         worksheet = sh.sheet1
         worksheet.clear() 
-        # ★★★★★ ヘッダーを修正 ★★★★★
         header = ['scheduled_time', 'post_type', 'content', 'status', 'posted_time', 'posted_tweet_url']
         worksheet.append_row(header)
         print("✅ スプレッドシートを準備しました。")
@@ -162,6 +184,7 @@ if __name__ == "__main__":
             post_to_write = affiliate_posts.pop(0)
         
         if post_to_write:
+            # スプレッドシートの列に合わせてデータを調整
             rows_to_add.append([time_str, post_to_write['topic'], post_to_write['content'], 'pending', '', ''])
     
     if rows_to_add:
