@@ -54,18 +54,6 @@ def get_gspread_client():
         print(f"🛑 エラー: gspreadクライアントの取得中にエラー: {e}")
     return None
 
-def search_rakuten(keyword):
-    """楽天APIで商品を検索するヘルパー関数"""
-    print(f"  - 楽天を検索中... (キーワード: '{keyword}')")
-    params = {
-        "applicationId": g_rakuten_app_id, "affiliateId": g_rakuten_affiliate_id,
-        "keyword": keyword, "format": "json", "sort": random.choice(["standard", "-reviewCount"]),
-        "hits": 10, "page": random.randint(1, 3)
-    }
-    response = requests.get("https://app.rakuten.co.jp/services/api/IchibaItem/Search/20220601", params=params)
-    response.raise_for_status()
-    return response.json().get("Items", [])
-
 # ==============================================================================
 # ハイブリッド投稿案を生成するメイン関数
 # ==============================================================================
@@ -74,44 +62,63 @@ def generate_hybrid_post(topic_seed):
     try:
         model = g_gemini_model
         
-        # STEP 1: テーマの決定
         theme_prompt = f"あなたは日本のSNSマーケティングの専門家です。X(Twitter)アカウント「ゆあ＠プチプラコスメ塾」のフォロワーが保存したくなるような投稿を作るため、以下の切り口から、具体的で魅力的な投稿テーマを1つ考えてください。\n# テーマの切り口\n{topic_seed}\n# 出力形式\nテーマの文字列のみ"
         response = model.generate_content(theme_prompt)
         topic = response.text.strip()
         print(f"  ✅ 生成された最終テーマ: {topic}")
 
-        # STEP 2: 検索キーワードの生成
         keyword_prompt = f"以下の投稿テーマに最も関連性が高く、楽天市場で商品を検索するための具体的な検索キーワードを1つ生成してください。\n# 投稿テーマ\n{topic}\n# 指示\n- 楽天市場の商品名に含まれやすい、2〜3個の名詞の組み合わせにすること。\n- 回答はキーワード文字列のみ。"
         response = model.generate_content(keyword_prompt)
-        smart_keyword = response.text.strip().replace("　", " ")
-        print(f"  ✅ AIが考案した「スマートキーワード」: {smart_keyword}")
+        keyword = response.text.strip().replace("　", " ")
+        print(f"  ✅ 楽天検索用キーワード: {keyword}")
 
-        # ★★★★★ ここからが2段構えの検索ロジック ★★★★★
-        # STEP 3: スマートキーワードでまず検索
-        items = search_rakuten(smart_keyword)
-
-        # STEP 4: もし見つからなければ、セーフキーワードで再検索
-        if not items:
-            print(f"  ⚠️ スマートキーワードで商品が見つかりませんでした。安全なキーワードで再検索します。")
-            safe_keyword_prompt = f"以下の文章から、商品を検索するための最も重要で基本的な名詞を2つか3つ、スペース区切りで抜き出してください。\n# 文章\n{topic}"
-            response = model.generate_content(safe_keyword_prompt)
-            safe_keyword = response.text.strip().replace("　", " ")
-            print(f"  ✅ AIが考案した「セーフキーワード」: {safe_keyword}")
-            items = search_rakuten(safe_keyword)
-
-        if not items:
-            print("  🛑 2回の検索でも関連商品を見つけられませんでした。このテーマをスキップします。")
-            return None
-        # ★★★★★ ここまでが2段構えの検索ロジック ★★★★★
+        items = []
+        for attempt in range(3):
+            sort_options = ["standard", "-reviewCount", "-reviewAverage"]
+            params = { "applicationId": g_rakuten_app_id, "affiliateId": g_rakuten_affiliate_id, "keyword": keyword, "format": "json", "sort": random.choice(sort_options), "hits": 10, "page": random.randint(1, 3) }
+            response = requests.get("https://app.rakuten.co.jp/services/api/IchibaItem/Search/20220601", params=params)
+            response.raise_for_status()
+            items = response.json().get("Items", [])
+            if items:
+                print(f"  ✅ 楽天で{len(items)}件の商品を発見。")
+                break
+            else:
+                print(f"  ⚠️ 楽天で「{keyword}」に合う商品が見つかりませんでした。(試行 {attempt + 1}/3)")
+                time.sleep(3)
         
-        print(f"  ✅ 楽天で{len(items)}件の商品を発見。")
+        if not items:
+            print("  🛑 3回試行しましたが、関連商品を見つけられませんでした。")
+            return None
+
         item_candidates = random.sample(items, min(len(items), 5))
         formatted_items_string = "\n".join([f"- 商品名: {i['Item']['itemName']}, URL: {i['Item']['affiliateUrl']}" for i in item_candidates])
         
-        # STEP 5: 最終的な記事を執筆
-        final_post_prompt = f"""あなたはXアカウント「ゆあ＠プチプラコスメ塾」の運営者「ゆあ」です。以下のテーマと商品リストを基に、フォロワーに価値を提供しつつ、自然に商品を紹介する、1つのまとまった投稿を作成してください。\n# 絶対的なルール\n- 1つの投稿として、日本語で合計500文字以内に収めること。\n- **【最重要】投稿の超導入部分（最初の100文字以内）で**、テーマに関する読者の悩みを提示し、その解決策となる商品を「結論」として先に提示し、アフィリエイトURLを記載すること。\n- 投稿の後半では、紹介した商品のさらに詳しい使い方や、関連する美容テクニックなどを解説し、記事全体の価値を高めること。\n- 最後に、投稿内容に最も関連性が高く、インプレッションを最大化できるハッシュタグを5〜6個厳選して付ける。`#PR`も必ず含めること。\n- 必ず具体的な商品名を記述し、「〇〇」のようなプレースホルダーは使わないこと。\n- あなた自身で文章を読み返し、不自然な点がないかセルフチェックしてから出力を完了する。\n# 投稿テーマ\n{topic}\n# 紹介して良い商品リスト（この中から1つだけ選ぶ）\n{formatted_items_string}\n# 出力形式（JSON）\n{{\"content\": \"（生成した500字以内の投稿文全体）\"}}"""
-        
-        response = model.generate_content(final_post_prompt)
+        # ★★★★★ プロンプトを最終調整 ★★★★★
+        final_post_prompt = f"""
+あなたはXアカウント「ゆあ＠プチプラコスメ塾」の運営者「ゆあ」です。
+以下のテーマと商品リストを基に、フォロワーに価値を提供しつつ、自然に商品を紹介する、1つのまとまった投稿を作成してください。
+
+# 絶対的なルール
+- **【リンク位置・最重要】投稿の**冒頭50文字以内**で、テーマに関する悩みを一言で提示し、その解決策となる商品を「結論」として紹介し、アフィリエイトURLを記載すること。**
+- 【構成例】「（お悩み）なら絶対これ！【（商品名）】（アフィリエイトURL）」のように、結論を先に提示する構成を厳守する。
+- 【文字数】1つの投稿として、日本語で合計500文字以内に収めること。
+- 【深掘り】投稿の後半では、紹介した商品のさらに詳しい使い方や、関連する美容テクニックなどを解説し、記事全体の価値を高めること。
+- 【ハッシュタグ】最後に、投稿内容に最も関連性が高く、インプレッションを最大化できるハッシュタグを5〜6個厳選して付ける。`#PR`も必ず含めること。
+- 【品質】言及する商品は実在のものとし、推奨は文脈に適合していること。プレースホルダー（〇〇など）は絶対に使わないこと。
+- 【その他】スマホでの見やすさを最優先し、改行や絵文字を効果的に使う。マークダウン記法は使わない。あなた自身で文章を読み返し、不自然な点がないかセルフチェックしてから出力を完了する。
+
+# 投稿テーマ
+{topic}
+
+# 紹介して良い商品リスト（この中から1つだけ選ぶ）
+{formatted_items_string}
+
+# 出力形式（JSON）
+{{
+  "content": "（生成した500字以内の投稿文全体。アフィリエイトURLもこの中に含める）"
+}}
+"""
+        response = g_gemini_model.generate_content(final_post_prompt)
         result = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
         
         long_url_match = re.search(r'(https?://[^\s]+)', result['content'])
@@ -150,15 +157,13 @@ if __name__ == "__main__":
 
     rows_to_add = []
     used_topics = set()
-    
-    # ★★★★★ 投稿数が目標に達するまで挑戦するループ ★★★★★
     target_post_count = len(POSTING_SCHEDULE)
     print(f"\n--- 今日の投稿案 {target_post_count}件の生成を開始します ---")
     
     while len(rows_to_add) < target_post_count:
         print(f"\n--- {len(rows_to_add) + 1}件目の投稿案を生成します ---")
         
-        if not list(set(ALL_TOPICS_SEED) - used_topics): # 全てのお題を使い切ったらリセット
+        if not list(set(ALL_TOPICS_SEED) - used_topics):
             used_topics = set()
         
         available_topics = list(set(ALL_TOPICS_SEED) - used_topics)
@@ -167,19 +172,19 @@ if __name__ == "__main__":
         
         post_data = generate_hybrid_post(topic_seed)
         if post_data:
-            rows_to_add.append(post_data) # あとで時刻と合わせて書き込む
+            rows_to_add.append(post_data)
         
-        time.sleep(20)
+        time.sleep(30)
     
-    # スケジュール時刻と生成済み投稿をマッピングして書き込み
-    rows_for_sheet = []
-    for i, time_str in enumerate(sorted(POSTING_SCHEDULE.keys())):
-        if i < len(rows_to_add):
-            post = rows_to_add[i]
-            rows_for_sheet.append([time_str, post['topic'], post['content'], 'pending', '', ''])
-            
-    if rows_for_sheet:
-        worksheet.append_rows(rows_for_sheet, value_input_option='USER_ENTERED')
-        print(f"\n✅ スプレッドシートに{len(rows_for_sheet)}件の投稿案を全て書き込みました。")
+    if rows_to_add:
+        rows_for_sheet = []
+        for i, time_str in enumerate(sorted(POSTING_SCHEDULE.keys())):
+            if i < len(rows_to_add):
+                post = rows_to_add[i]
+                rows_for_sheet.append([time_str, post['topic'], post['content'], 'pending', '', ''])
+        
+        if rows_for_sheet:
+            worksheet.append_rows(rows_for_sheet, value_input_option='USER_ENTERED')
+            print(f"\n✅ スプレッドシートに{len(rows_for_sheet)}件の投稿案を全て書き込みました。")
 
     print("🏁 コンテンツ一括生成プログラムを終了します。")
