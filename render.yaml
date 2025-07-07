@@ -1,0 +1,20 @@
+services:
+  # 1つ目のボット：プロデューサー
+  - type: cron
+    name: producer-bot
+    env: python
+    region: oregon
+    schedule: "0 16 * * *" # 日本時間の深夜1時
+    # buildCommandでpipをアップグレードしてから、ライブラリをインストール
+    buildCommand: "python3 -m pip install --upgrade pip && python3 -m pip install -r requirements.txt"
+    startCommand: "python3 producer.py"
+
+  # 2つ目のボット：コンシューマー
+  - type: cron
+    name: consumer-bot
+    env: python
+    region: oregon
+    schedule: "*/5 * * * *" # 5分ごと
+    # こちらも同様に設定
+    buildCommand: "python3 -m pip install --upgrade pip && python3 -m pip install -r requirements.txt"
+    startCommand: "python3 consumer.py"
