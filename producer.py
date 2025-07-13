@@ -1,14 +1,15 @@
 import os
+import sys
 import random
 import json
-import requests
 import time
 import re
 from datetime import datetime, date
 import pytz
-import gspread
-import google.generativeai as genai
-from google.oauth2.service_account import Credentials
+
+# --- 最初に最低限のライブラリのみをインポート ---
+print("--- SCRIPT START ---")
+sys.stdout.flush()
 
 # --- 定数と設定 ---
 SPREADSHEET_NAME = 'コスメ投稿案リスト'
@@ -17,26 +18,31 @@ POSTING_SCHEDULE = {
     "21:00": "hybrid", "22:00": "hybrid", "22:30": "hybrid", "21:30": "hybrid", "14:00": "hybrid",
     "15:00": "hybrid", "12:30": "hybrid", "19:00": "hybrid", "11:00": "hybrid", "00:00": "hybrid"
 }
-SEASONAL_TOPICS = ["春の新作色っぽリップ", "夏の崩れない最強下地", "秋の抜け感ブラウンシャドウ", "冬の高保湿スキンケア", "紫外線対策 日焼け止め", "汗・皮脂に強いファンデーション"]
-CONCERN_TOPICS = ["気になる毛穴の黒ずみ撃退法", "頑固なニキビ跡を隠すコンシーラー術", "敏感肌でも安心な低刺激コスメ", "ブルベ女子に似合う透明感チーク", "イエベ女子のための必勝アイシャドウ"]
-TECHNIQUE_TOPICS = ["中顔面を短縮するメイクテクニック", "誰でも簡単！涙袋の作り方", "プロが教える眉毛の整え方", "チークをアイシャドウとして使う裏技", "証明写真 盛れるメイク術"]
-ALL_TOPICS_SEED = SEASONAL_TOPICS + CONCERN_TOPICS + TECHNIQUE_TOPICS
 
 # --- グローバル変数 ---
-g_rakuten_app_id = None
-g_rakuten_affiliate_id = None
 g_gemini_model = None
+g_rakuten_app_id, g_rakuten_affiliate_id = None, None
+g_amazon_access_key, g_amazon_secret_key, g_amazon_associate_tag = None, None, None
 
 # --- 初期セットアップ ---
 def setup_apis():
-    global g_rakuten_app_id, g_rakuten_affiliate_id, g_gemini_model
+    global g_rakuten_app_id, g_rakuten_affiliate_id, g_amazon_access_key, g_amazon_secret_key, g_amazon_associate_tag, g_gemini_model
     try:
+        import google.generativeai as genai
         GEMINI_API_KEY = os.getenv('GEMINI_API_KEY2')
         g_rakuten_app_id = os.getenv('RAKUTEN_APP_ID')
         g_rakuten_affiliate_id = os.getenv('RAKUTEN_AFFILIATE_ID')
+        g_amazon_access_key = os.getenv('AMAZON_ACCESS_KEY')
+        g_amazon_secret_key = os.getenv('AMAZON_SECRET_KEY')
+        g_amazon_associate_tag = os.getenv('AMAZON_ASSOCIATE_TAG')
+        
+        if not all([GEMINI_API_KEY, g_rakuten_app_id, g_amazon_access_key]):
+            print("🛑 エラー: 必要なAPIキーが環境変数に設定されていません。")
+            return False
+            
         genai.configure(api_key=GEMINI_API_KEY)
         g_gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-        print("✅ APIキーとGeminiモデルの準備が完了しました。")
+        print("✅ 全てのAPIキーを読み込み、モデルを準備しました。")
         return True
     except Exception as e:
         print(f"🛑 エラー: APIセットアップ中にエラー: {e}")
@@ -54,71 +60,47 @@ def get_gspread_client():
         print(f"🛑 エラー: gspreadクライアントの取得中にエラー: {e}")
     return None
 
-# ==============================================================================
-# ハイブリッド投稿案を生成するメイン関数
-# ==============================================================================
-def generate_hybrid_post(topic_seed):
-    print(f"  - テーマの切り口「{topic_seed}」で投稿案を生成中...")
+def search_products(platform, keyword):
+    print(f"  - {platform.capitalize()}を検索中... (キーワード: '{keyword}')")
     try:
-        model = g_gemini_model
-        
-        theme_prompt = f"あなたは日本のSNSマーケティングの専門家です。X(Twitter)アカウント「ゆあ＠プチプラコスメ塾」のフォロワーが保存したくなるような投稿を作るため、以下の切り口から、具体的で魅力的な投稿テーマを1つ考えてください。\n# テーマの切り口\n{topic_seed}\n# 出力形式\nテーマの文字列のみ"
-        response = model.generate_content(theme_prompt)
-        topic = response.text.strip()
-        print(f"  ✅ 生成された最終テーマ: {topic}")
-
-        keyword_prompt = f"以下の投稿テーマに最も関連性が高く、楽天市場で商品を検索するための具体的な検索キーワードを1つ生成してください。\n# 投稿テーマ\n{topic}\n# 指示\n- 楽天市場の商品名に含まれやすい、2〜3個の名詞の組み合わせにすること。\n- 回答はキーワード文字列のみ。"
-        response = model.generate_content(keyword_prompt)
-        keyword = response.text.strip().replace("　", " ")
-        print(f"  ✅ 楽天検索用キーワード: {keyword}")
-
-        items = []
-        for attempt in range(3):
-            sort_options = ["standard", "-reviewCount", "-reviewAverage"]
-            params = { "applicationId": g_rakuten_app_id, "affiliateId": g_rakuten_affiliate_id, "keyword": keyword, "format": "json", "sort": random.choice(sort_options), "hits": 10, "page": random.randint(1, 3) }
+        import requests
+        if platform == "rakuten":
+            params = {"applicationId": g_rakuten_app_id, "affiliateId": g_rakuten_affiliate_id, "keyword": keyword, "format": "json", "sort": "-reviewCount", "hits": 10}
             response = requests.get("https://app.rakuten.co.jp/services/api/IchibaItem/Search/20220601", params=params)
             response.raise_for_status()
-            items = response.json().get("Items", [])
-            if items:
-                print(f"  ✅ 楽天で{len(items)}件の商品を発見。")
-                break
-            else:
-                print(f"  ⚠️ 楽天で「{keyword}」に合う商品が見つかりませんでした。(試行 {attempt + 1}/3)")
-                time.sleep(3)
+            return [{"name": i['Item']['itemName'], "url": i['Item']['affiliateUrl']} for i in response.json().get("Items", [])]
+        elif platform == "amazon":
+            from paapi5_python_sdk.api.default_api import DefaultApi
+            from paapi5_python_sdk.models.partner_type import PartnerType
+            from paapi5_python_sdk.models.search_items_request import SearchItemsRequest
+            from paapi5_python_sdk.models.search_items_resource import SearchItemsResource
+            from paapi5_python_sdk.rest import ApiException
+            api_client = DefaultApi(access_key=g_amazon_access_key, secret_key=g_amazon_secret_key, host="webservices.amazon.co.jp", region="us-west-2")
+            search_request = SearchItemsRequest(partner_tag=g_amazon_associate_tag, partner_type=PartnerType.ASSOCIATES, keywords=keyword, search_index="Beauty", resources=[SearchItemsResource.ITEMINFO_TITLE, SearchItemsResource.DETAILPAGEURL], item_count=10)
+            response = api_client.search_items(search_request)
+            return [{"name": i.item_info.title.display_value, "url": i.detail_page_url} for i in response.search_result.items] if response.search_result and response.search_result.items else []
+    except Exception as e:
+        print(f"  🛑 {platform.capitalize()} APIエラー: {e}")
+    return []
+
+def generate_hybrid_post(platform, topic):
+    print(f"  - 【{platform.upper()}】のテーマ「{topic}」で投稿案を生成中...")
+    try:
+        model = g_gemini_model
+        keyword_prompt = f"テーマ「{topic}」に最も関連する、ECサイトでヒットしやすい具体的な検索キーワードを1つ生成してください。"
+        keyword = model.generate_content(keyword_prompt).text.strip().replace("　", " ")
         
+        items = search_products(platform, keyword)
         if not items:
-            print("  🛑 3回試行しましたが、関連商品を見つけられませんでした。")
+            print(f"  ⚠️ {platform}で商品が見つかりませんでした。")
             return None
-
-        item_candidates = random.sample(items, min(len(items), 5))
-        formatted_items_string = "\n".join([f"- 商品名: {i['Item']['itemName']}, URL: {i['Item']['affiliateUrl']}" for i in item_candidates])
+            
+        formatted_items = "\n".join([f"- 商品名: {i['name']}, URL: {i['url']}" for i in items[:5]])
+        platform_name = "楽天市場" if platform == "rakuten" else "Amazon"
+        platform_hashtag = "#楽天でみつけた神コスメ" if platform == "rakuten" else "#Amazonで見つけた"
+        final_post_prompt = f"あなたはXアカウント「ゆあ＠プチプラコスメ塾」の運営者です。テーマ「{topic}」と{platform_name}の商品リストを基に、価値を提供しつつ自然に商品を1つ紹介する400字以内の投稿をJSON形式で作成してください。\n#ルール\n- 冒頭100文字以内で結論として商品を紹介しURLを記載\n- 最後にハッシュタグを5-6個付けること(#PRと{platform_hashtag}は必須)\n- 具体的な商品名を記述すること\n#商品リスト\n{formatted_items}\n#出力形式\n{{\"content\": \"（投稿文全体）\"}}"
         
-        # ★★★★★ プロンプトを最終調整 ★★★★★
-        final_post_prompt = f"""
-あなたはXアカウント「ゆあ＠プチプラコスメ塾」の運営者「ゆあ」です。
-以下のテーマと商品リストを基に、フォロワーに価値を提供しつつ、自然に商品を紹介する、1つのまとまった投稿を作成してください。
-
-# 絶対的なルール
-- **【リンク位置・最重要】投稿の**冒頭50文字以内**で、テーマに関する悩みを一言で提示し、その解決策となる商品を「結論」として紹介し、アフィリエイトURLを記載すること。**
-- 【構成例】「（お悩み）なら絶対これ！【（商品名）】（アフィリエイトURL）」のように、結論を先に提示する構成を厳守する。
-- 【文字数】1つの投稿として、日本語で合計500文字以内に収めること。
-- 【深掘り】投稿の後半では、紹介した商品のさらに詳しい使い方や、関連する美容テクニックなどを解説し、記事全体の価値を高めること。
-- 【ハッシュタグ】最後に、投稿内容に最も関連性が高く、インプレッションを最大化できるハッシュタグを5〜6個厳選して付ける。`#PR`も必ず含めること。
-- 【品質】言及する商品は実在のものとし、推奨は文脈に適合していること。プレースホルダー（〇〇など）は絶対に使わないこと。
-- 【その他】スマホでの見やすさを最優先し、改行や絵文字を効果的に使う。マークダウン記法は使わない。あなた自身で文章を読み返し、不自然な点がないかセルフチェックしてから出力を完了する。
-
-# 投稿テーマ
-{topic}
-
-# 紹介して良い商品リスト（この中から1つだけ選ぶ）
-{formatted_items_string}
-
-# 出力形式（JSON）
-{{
-  "content": "（生成した500字以内の投稿文全体。アフィリエイトURLもこの中に含める）"
-}}
-"""
-        response = g_gemini_model.generate_content(final_post_prompt)
+        response = model.generate_content(final_post_prompt)
         result = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
         
         long_url_match = re.search(r'(https?://[^\s]+)', result['content'])
@@ -129,21 +111,22 @@ def generate_hybrid_post(topic_seed):
         else:
             final_content = result['content']
             
-        print(f"  ✅ ハイブリッド投稿案を生成完了。")
-        return {"type": "hybrid", "topic": topic, "content": final_content}
-        
+        print(f"  ✅ {platform.capitalize()}の投稿案を生成完了。")
+        return {"type": f"{platform}_hybrid", "topic": f"{platform.capitalize()}投稿: {topic}", "content": final_content}
     except Exception as e:
         print(f"  🛑 ハイブリッド投稿の生成中にエラー: {e}")
         return None
 
-# ==============================================================================
-# メインの実行ロジック
-# ==============================================================================
 if __name__ == "__main__":
-    print("🚀 コンテンツ一括生成プログラムを開始します。")
+    print("--- メイン処理の開始 ---")
+    sys.stdout.flush()
     if not setup_apis(): raise SystemExit()
+    
     gc = get_gspread_client()
     if not gc: raise SystemExit()
+
+    print("✅ 全てのクライアント準備が完了しました。")
+    sys.stdout.flush()
 
     try:
         sh = gc.open(SPREADSHEET_NAME)
@@ -152,39 +135,29 @@ if __name__ == "__main__":
         header = ['scheduled_time', 'post_type', 'content', 'status', 'posted_time', 'posted_tweet_url']
         worksheet.append_row(header)
         print("✅ スプレッドシートを準備しました。")
+        sys.stdout.flush()
     except Exception as e:
         print(f"🛑 スプレッドシートの準備中にエラー: {e}"); raise SystemExit()
 
     rows_to_add = []
-    used_topics = set()
-    target_post_count = len(POSTING_SCHEDULE)
-    print(f"\n--- 今日の投稿案 {target_post_count}件の生成を開始します ---")
+    print(f"\n--- 今日の投稿案 {len(POSTING_SCHEDULE)}件の生成を開始します ---")
+    sys.stdout.flush()
     
-    while len(rows_to_add) < target_post_count:
-        print(f"\n--- {len(rows_to_add) + 1}件目の投稿案を生成します ---")
+    for i, time_str in enumerate(sorted(POSTING_SCHEDULE.keys())):
+        platform_to_use = "rakuten" if i % 2 == 0 else "amazon"
+        print(f"\n--- {time_str} ({platform_to_use.upper()}) の投稿案を生成します ---")
+        sys.stdout.flush()
         
-        if not list(set(ALL_TOPICS_SEED) - used_topics):
-            used_topics = set()
-        
-        available_topics = list(set(ALL_TOPICS_SEED) - used_topics)
-        topic_seed = random.choice(available_topics)
-        used_topics.add(topic_seed)
-        
-        post_data = generate_hybrid_post(topic_seed)
+        post_data = generate_hybrid_post(platform_to_use, "コスメ") # topicは固定または動的に
         if post_data:
-            rows_to_add.append(post_data)
+            rows_to_add.append([time_str, post_data['topic'], post_data['content'], 'pending', '', ''])
         
         time.sleep(30)
     
     if rows_to_add:
-        rows_for_sheet = []
-        for i, time_str in enumerate(sorted(POSTING_SCHEDULE.keys())):
-            if i < len(rows_to_add):
-                post = rows_to_add[i]
-                rows_for_sheet.append([time_str, post['topic'], post['content'], 'pending', '', ''])
-        
-        if rows_for_sheet:
-            worksheet.append_rows(rows_for_sheet, value_input_option='USER_ENTERED')
-            print(f"\n✅ スプレッドシートに{len(rows_for_sheet)}件の投稿案を全て書き込みました。")
+        worksheet.append_rows(rows_to_add, value_input_option='USER_ENTERED')
+        print(f"\n✅ スプレッドシートに{len(rows_to_add)}件の投稿案を全て書き込みました。")
+        sys.stdout.flush()
 
     print("🏁 コンテンツ一括生成プログラムを終了します。")
+    sys.stdout.flush()
