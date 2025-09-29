@@ -35,7 +35,7 @@ def setup_apis():
         g_rakuten_app_id = os.getenv('RAKUTEN_APP_ID')
         g_rakuten_affiliate_id = os.getenv('RAKUTEN_AFFILIATE_ID')
         genai.configure(api_key=GEMINI_API_KEY)
-        g_gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+        g_gemini_model = genai.GenerativeModel('gemini-2.5-flash')
         print("✅ APIキーとGeminiモデルの準備が完了しました。")
         return True
     except Exception as e:
